@@ -53,6 +53,14 @@ fn tile_matmul_supported(
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Serialize, Deserialize, AutotuneKey)]
 pub struct FusedMatmulAutotuneKey {
     matmul_key: MatmulAutotuneKey,
+    // The matrix key describes M/N/K and layouts, but omits batch counts.
+    // Operand sizes distinguish a single matrix, many matrices, and shared RHS.
+    #[autotune(anchor)]
+    lhs_elements: usize,
+    #[autotune(anchor)]
+    rhs_elements: usize,
+    #[autotune(anchor)]
+    out_elements: usize,
     #[autotune(anchor)]
     num_out_buffers: usize,
     #[autotune(anchor)]
@@ -313,7 +321,14 @@ pub(crate) fn create_key(input: &TuneInput<MatmulOptimizationTuneArg>) -> FusedM
         opt.info.matmul.lhs.scheme(),
         opt.info.matmul.rhs.scheme(),
     );
-    FusedMatmulAutotuneKey::new(key, opt.info.num_output_buffers(), opt.info.num_ops_fused())
+    FusedMatmulAutotuneKey::new(
+        key,
+        lhs.shape.num_elements(),
+        rhs.shape.num_elements(),
+        out.shape.num_elements(),
+        opt.info.num_output_buffers(),
+        opt.info.num_ops_fused(),
+    )
 }
 
 fn tune_fused(
@@ -330,4 +345,31 @@ fn tune_fused(
 
 fn tune_fallback(input: TuneInput<MatmulOptimizationTuneArg>) -> Result<TuneOutput, String> {
     Ok(input.execute(|ctx, opt| opt.execute_fallback(ctx)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fused_matmul_key_separates_batch_work_and_shared_operands() {
+        use cubecl::ir::{ElemType, FloatKind};
+        let f32 = ElemType::Float(FloatKind::F32);
+        let matrix_key = MatmulAutotuneKey::from_parts(
+            &[1, 64, 64].into(),
+            &[1, 64, 64].into(),
+            &[4096, 64, 1].into(),
+            &[4096, 64, 1].into(),
+            Default::default(),
+            Default::default(),
+            f32,
+            f32,
+            f32,
+            None,
+            None,
+        );
+        let key =
+            |lhs, rhs, out| FusedMatmulAutotuneKey::new(matrix_key.clone(), lhs, rhs, out, 1, 2);
+        assert_ne!(key(4096, 4096, 4096), key(32768, 32768, 32768));
+        assert_ne!(key(32768, 4096, 32768), key(32768, 32768, 32768));
+    }
 }
