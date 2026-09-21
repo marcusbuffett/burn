@@ -178,19 +178,46 @@ impl VectorAxes {
         context: &Context<CubeFusionHandle>,
         plan: &LaunchPlan<'_>,
     ) -> Self {
-        // The runner knows better for its own operands — the matmul one places the
-        // axis by matrix layout — so anything it sets wins, refusals included.
+        // The runner chooses the storage axis for its own operands. A tensor
+        // reused by fused elementwise reads must ALSO agree with that block's
+        // axis. Otherwise one vector binding would describe two different sets
+        // of elements (e.g. a transposed matmul RHS reused by its epilogue).
         let axis = runner.axis(plan);
+        let mut shared_refusals = Vec::new();
+        for input in plan
+            .handle_inputs
+            .iter()
+            .filter_map(|input| input.as_normal())
+        {
+            let rank = input.global_ir.shape.rank();
+            let runner_axis = axis.get(input.global_ir.id, || usize::MAX);
+            if runner_axis == usize::MAX {
+                continue;
+            }
+            for block in &plan.blocks {
+                if block.reads.contains_key(&input.relative_id)
+                    && runner_axis != block_axis(&block.reference).unwrap_or(rank - 1)
+                {
+                    shared_refusals.push(input.global_ir.id);
+                    break;
+                }
+            }
+        }
         let policy = VectorAxisPolicy::of_plan(plan);
 
         if let VectorAxisPolicy::AlwaysDefault = policy {
             return Self {
                 axis,
-                refused: Refusals::default(),
+                refused: Refusals {
+                    ids: shared_refusals,
+                },
             };
         }
 
-        Self::from_actions(axis, Actions::gather(policy, resources, context, plan))
+        let mut resolved =
+            Self::from_actions(axis, Actions::gather(policy, resources, context, plan));
+        resolved.refused.ids.extend(shared_refusals);
+        resolved
     }
 
     fn from_actions(mut axis: VectorizationAxis, actions: Actions) -> Self {

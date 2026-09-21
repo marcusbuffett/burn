@@ -122,3 +122,32 @@ fn matmul_tall_matrix_vector_should_not_overflow_stack() {
         .into_data()
         .assert_approx_eq::<FloatElem>(&expected.into_data(), Tolerance::rel_abs(1e-4, 1e-5));
 }
+
+/// A transposed matmul operand reused by its epilogue must be read along
+/// logical columns there, even when matmul vectorizes along physical rows.
+#[test]
+fn matmul_transposed_operand_reused_in_epilogue() {
+    let device = Device::default();
+    let reference = ReferenceDevice::new();
+    for (rows, cols) in [(192, 12), (768, 80), (19, 7)] {
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 31 % 101) as f32 - 50.0) / 100.0)
+            .collect();
+        let square: Vec<f32> = (0..cols * cols)
+            .map(|i| ((i * 13 % 37) as f32 - 18.0) / 100.0)
+            .collect();
+        let x = TestTensor::<1>::from_data(data.as_slice(), &device)
+            .reshape([rows, cols])
+            .swap_dims(0, 1);
+        let b = TestTensor::<1>::from_data(square.as_slice(), &device).reshape([cols, cols]);
+        let x_ref = TestTensor::<2>::from_data(x.to_data(), &reference);
+        let b_ref = TestTensor::<2>::from_data(b.to_data(), &reference);
+        let expected = b_ref.matmul(x_ref.clone()) + x_ref * 3.4445;
+        // Queue matmul first so the multiply and add can fuse into its epilogue.
+        let product = b.matmul(x.clone());
+        let actual = product + x * 3.4445;
+        expected
+            .to_data()
+            .assert_approx_eq::<FloatElem>(&actual.to_data(), Tolerance::default());
+    }
+}
