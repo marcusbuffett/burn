@@ -612,14 +612,34 @@ impl ModuleOps<Self> for Dispatch {
         )
     }
 
-    // TODO: linear ops
-    // fn linear(
-    //         x: FloatTensor<Self>,
-    //         weight: FloatTensor<Self>,
-    //         bias: Option<FloatTensor<Self>>,
-    //     ) -> FloatTensor<Self> {
+    // Dispatch the module operation before decomposing it. In particular,
+    // Autodiff::linear has a weight backward that reduces the leading input
+    // dimensions in the contraction, without a [batch, in, out] temporary.
+    fn linear(
+        x: FloatTensor<Self>,
+        weight: FloatTensor<Self>,
+        bias: Option<FloatTensor<Self>>,
+    ) -> FloatTensor<Self> {
+        B::linear(x, weight, bias)
+    }
 
-    // }
+    fn linear_x_backward(
+        weight: FloatTensor<Self>,
+        output_grad: FloatTensor<Self>,
+    ) -> FloatTensor<Self> {
+        B::linear_x_backward(weight, output_grad)
+    }
+
+    fn linear_weight_backward(
+        x: FloatTensor<Self>,
+        output_grad: FloatTensor<Self>,
+    ) -> FloatTensor<Self> {
+        B::linear_weight_backward(x, output_grad)
+    }
+
+    fn linear_bias_backward(output_grad: FloatTensor<Self>) -> FloatTensor<Self> {
+        B::linear_bias_backward(output_grad)
+    }
 }
 
 #[backend_dispatch]
