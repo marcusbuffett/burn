@@ -100,7 +100,7 @@ mod tests {
             throughput::ThroughputMode,
         };
         let tensor = crate::ops::from_data(
-            TensorData::new([1.0_f32], [1]),
+            TensorData::new(vec![1.0_f32], [1]),
             &crate::CubeDevice::default(),
         );
         let f32 = ElemType::Float(FloatKind::F32);
