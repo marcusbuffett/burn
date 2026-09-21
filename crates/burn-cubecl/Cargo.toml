@@ -41,6 +41,7 @@ fft = ["cubek/fft"]
 # so that this crate also builds, and documents, on its own. `doc` picks wgpu as the portable one.
 cuda = ["cubecl/cuda", "burn-backend/cubecl-cuda"]
 cuda-cublas = ["cuda", "cubecl/cuda-cublas"]
+cuda-cublas-bf16 = ["cuda-cublas"]
 hip = ["cubecl/hip", "burn-backend/cubecl-hip"]
 cpu = ["cubecl/cpu", "burn-backend/cubecl-cpu"]
 wgpu = ["cubecl/wgpu", "burn-backend/cubecl-wgpu"]
