@@ -158,7 +158,56 @@ impl ReshapeAnalysis {
 
 /// Returns the proper action to take when reshaping a tensor.
 pub fn reshape_action(shape: &Shape, strides: &Strides, shape_new: &Shape) -> ReshapeAction {
-    reshape_analysis(shape, Some(strides), shape_new).action(shape, strides, shape_new)
+    let action =
+        reshape_analysis(shape, Some(strides), shape_new).action(shape, strides, shape_new);
+    if matches!(action, ReshapeAction::Recompute)
+        && let Some(strides) = reshape_view_strides(shape, strides, shape_new)
+    {
+        return ReshapeAction::UpdateStrides { strides };
+    }
+    action
+}
+
+// A strided tensor is a sequence of physically contiguous runs. A view may
+// split or merge dimensions inside a run, but cannot cross a padding or
+// permutation boundary. Unit dimensions do not constrain the physical layout.
+fn reshape_view_strides(
+    shape: &[usize],
+    strides: &[usize],
+    shape_new: &[usize],
+) -> Option<Strides> {
+    if shape.is_empty() || shape.contains(&0) || shape_new.contains(&0) {
+        return None;
+    }
+    let mut result = strides![0; shape_new.len()];
+    let mut target_axis = shape_new.len();
+    let mut base_stride = *strides.last()?;
+    let mut source_elements = 1usize;
+    let mut target_elements = 1usize;
+    for axis in (0..shape.len()).rev() {
+        source_elements = source_elements.checked_mul(shape[axis])?;
+        let run_ends = axis == 0
+            || (shape[axis - 1] != 1
+                && strides[axis - 1] != source_elements.checked_mul(base_stride)?);
+        if run_ends {
+            while target_axis > 0
+                && (target_elements < source_elements || shape_new[target_axis - 1] == 1)
+            {
+                target_axis -= 1;
+                result[target_axis] = target_elements.checked_mul(base_stride)?;
+                target_elements = target_elements.checked_mul(shape_new[target_axis])?;
+            }
+            if target_elements != source_elements {
+                return None;
+            }
+            if axis > 0 {
+                base_stride = strides[axis - 1];
+                source_elements = 1;
+                target_elements = 1;
+            }
+        }
+    }
+    (target_axis == 0).then_some(result)
 }
 
 /// Calculate the new strides given added batch dimensions.
@@ -280,6 +329,67 @@ pub fn reshape_analysis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reshape_merges_pitched_batch_dimensions_without_copying() {
+        let action = reshape_action(
+            &[2048, 64, 960].into(),
+            &[65536, 1024, 1].into(),
+            &[131072, 960].into(),
+        );
+        match action {
+            ReshapeAction::UpdateStrides { strides } => assert_eq!(&*strides, &[1024, 1]),
+            other => panic!("Expected a pitched view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reshape_view_strides_preserve_every_logical_address() {
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[2, 3, 4], &[24, 8, 1]),
+            (&[2, 3, 4], &[1, 8, 2]),
+            (&[2, 3, 4], &[0, 4, 1]),
+            (&[2, 3, 4], &[0, 0, 0]),
+            (&[2, 1, 3], &[6, 999, 2]),
+            (&[1, 2, 1], &[777, 3, 999]),
+        ];
+        let offset = |mut index: usize, shape: &[usize], strides: &[usize]| {
+            let mut offset = 0;
+            for (&dim, &stride) in shape.iter().zip(strides).rev() {
+                offset += (index % dim) * stride;
+                index /= dim;
+            }
+            offset
+        };
+        for &(shape, strides) in cases {
+            let elements: usize = shape.iter().product();
+            let mut targets = alloc::vec![alloc::vec![elements]];
+            for a in 1..=elements {
+                if !elements.is_multiple_of(a) {
+                    continue;
+                }
+                targets.push(alloc::vec![a, elements / a]);
+                for b in 1..=elements / a {
+                    if (elements / a).is_multiple_of(b) {
+                        targets.push(alloc::vec![a, b, elements / a / b]);
+                    }
+                }
+            }
+            for target in targets {
+                if let Some(new_strides) = reshape_view_strides(shape, strides, &target) {
+                    for index in 0..elements {
+                        assert_eq!(
+                            offset(index, shape, strides),
+                            offset(index, &target, &new_strides),
+                            "{shape:?}/{strides:?} -> {target:?}/{new_strides:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(reshape_view_strides(&[2, 3], &[1, 2], &[6]).is_none());
+        assert!(reshape_view_strides(&[2, 3, 4], &[24, 8, 1], &[24]).is_none());
+    }
 
     #[test]
     fn test_reshape_analysis_is_contiguous() {

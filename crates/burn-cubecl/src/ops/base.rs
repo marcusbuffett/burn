@@ -694,3 +694,47 @@ mod cross_runtime_tests {
         into_data_sync(moved).assert_eq(&expected, true);
     }
 }
+
+#[cfg(test)]
+mod reshape_view_tests {
+    use super::*;
+    use burn_backend::TensorData;
+
+    #[test]
+    #[ignore = "requires an accelerator"]
+    fn reshape_pitched_batch_preserves_storage_and_values() {
+        let device = CubeDevice::default();
+        let values: Vec<f32> = (0..48).map(|i| i as f32).collect();
+        let mut input = from_data(TensorData::new(values.clone(), [2, 3, 8]), &device);
+        let strides = input.meta.strides().clone();
+        *input.meta = Metadata::new([2, 3, 5], strides);
+        let memory = input.handle.memory.clone().binding().id();
+        let output = reshape(input, [6, 5].into());
+        assert_eq!(
+            output.handle.memory.clone().binding().id(),
+            memory,
+            "reshape must preserve the allocation"
+        );
+        let expected: Vec<f32> = values
+            .chunks(8)
+            .flat_map(|row| row[..5].iter().copied())
+            .collect();
+        into_data_sync(output).assert_eq(&TensorData::new(expected, [6, 5]), true);
+    }
+    #[test]
+    #[ignore = "requires an accelerator"]
+    fn reshape_pitched_batch_through_fused_arithmetic() {
+        use burn_backend::ops::FloatTensorOps;
+        let device = Default::default();
+        let values: Vec<f32> = (0..48).map(|i| i as f32).collect();
+        let input =
+            crate::Cube::float_from_data(TensorData::new(values.clone(), [2, 3, 8]), &device);
+        let input = crate::Cube::float_add(input.clone(), input);
+        let view = crate::Cube::float_reshape(input, [6, 8].into());
+        let output = crate::Cube::float_mul(view.clone(), view);
+        let expected: Vec<f32> = values.iter().map(|x| 4.0 * x * x).collect();
+        cubecl::future::block_on(crate::Cube::float_into_data(output))
+            .unwrap()
+            .assert_eq(&TensorData::new(expected, [6, 8]), true);
+    }
+}
