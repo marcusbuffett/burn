@@ -129,12 +129,24 @@ impl Gradients {
     ///
     /// If the registered tensor is distributed, launches a syncing operation on the gradients.
     pub fn register<B: Backend>(&mut self, node_id: NodeId, value: FloatTensor<B>) {
-        let out =
-            if let Some(tensor_old) = self.container.remove::<TensorPrimitive<B>>(&node_id.value) {
-                B::float_add(value, tensor_old.tensor())
-            } else {
-                value
-            };
+        self.register_with::<B>(node_id, |old| match old {
+            Some(old) => B::float_add(value, old),
+            None => value,
+        });
+    }
+
+    /// Accumulate one contribution without materializing a dense intermediate.
+    /// The registration hook still observes exactly one completed contribution.
+    pub(crate) fn register_with<B: Backend>(
+        &mut self,
+        node_id: NodeId,
+        accumulate: impl FnOnce(Option<FloatTensor<B>>) -> FloatTensor<B>,
+    ) {
+        let old = self
+            .container
+            .remove::<TensorPrimitive<B>>(&node_id.value)
+            .map(|tensor| tensor.tensor());
+        let out = accumulate(old);
 
         self.container
             .register::<TensorPrimitive<B>>(node_id.value, TensorPrimitive::Float(out));

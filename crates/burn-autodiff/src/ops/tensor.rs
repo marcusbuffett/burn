@@ -2341,10 +2341,22 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
             ) {
                 let (slices, shape, device) = ops.state;
 
-                unary::<B, _>(ops.parents, ops.node, grads, |grad| {
-                    let zeros = B::float_zeros(shape, &device, grad.dtype().into());
-                    B::float_slice_assign(zeros, &slices, grad)
-                });
+                let grad = grads.consume::<B>(&ops.node);
+                if let Some(parent) = ops.parents[0].as_ref() {
+                    grads.register_with::<B>(parent.id, |previous| {
+                        let (target, value) = match previous {
+                            Some(previous) => {
+                                let selected = B::float_slice(previous.clone(), &slices);
+                                (previous, B::float_add(selected, grad))
+                            }
+                            None => {
+                                let zeros = B::float_zeros(shape, &device, grad.dtype().into());
+                                (zeros, grad)
+                            }
+                        };
+                        B::float_slice_assign(target, &slices, value)
+                    });
+                }
             }
         }
 
