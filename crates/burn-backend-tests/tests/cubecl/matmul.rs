@@ -227,3 +227,31 @@ fn matmul_broadcast_vs_merged_benchmark() {
         }
     }
 }
+
+/// The unfused baseline may merge the batches while fused candidates keep the
+/// original layout. Their epilogues must agree, including broadcast bias.
+#[test]
+fn matmul_shared_weight_epilogue_matches_merged_reference() {
+    let device = Device::default();
+    let reference = ReferenceDevice::new();
+    let (batch, rows, k, n) = (8, 64, 256, 768);
+    let values: Vec<f32> = (0..batch * rows * k)
+        .map(|i| ((i * 7 % 19) as f32 - 9.) / 32.)
+        .collect();
+    let weights: Vec<f32> = (0..k * n)
+        .map(|i| ((i * 11 % 23) as f32 - 11.) / 32.)
+        .collect();
+    let lhs = TestTensor::<1>::from_data(values.as_slice(), &device).reshape([batch, rows, k]);
+    let rhs = TestTensor::<1>::from_data(weights.as_slice(), &device).reshape([1, k, n]);
+    let bias = TestTensor::<3>::ones([1, 1, n], &device) * 0.25;
+    let lhs_ref =
+        TestTensor::<1>::from_data(values.as_slice(), &reference).reshape([batch * rows, k]);
+    let rhs_ref = TestTensor::<1>::from_data(weights.as_slice(), &reference).reshape([k, n]);
+    let expected = (lhs_ref.matmul(rhs_ref) + 0.25)
+        .mul_scalar(0.5)
+        .reshape([batch, rows, n]);
+    let actual = (lhs.matmul(rhs) + bias).mul_scalar(0.5);
+    actual
+        .to_data()
+        .assert_approx_eq::<FloatElem>(&expected.to_data(), Tolerance::rel_abs(2e-3, 2e-3));
+}
