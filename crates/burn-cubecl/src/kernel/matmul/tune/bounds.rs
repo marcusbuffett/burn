@@ -1,11 +1,8 @@
 use burn_backend::cubecl::{autotune::with_roofline_bounds, dtype_to_storage_type};
 use cubecl::{std::throughput::roofline_bounds, tune::TunableSet};
-use cubek::matmul::{
-    definition::{MatmulCost, MatmulGlobalElems},
-    tune_key::MatmulAutotuneKey,
-};
+use cubek::matmul::definition::{MatmulCost, MatmulGlobalElems};
 
-use crate::kernel::matmul::tune::base::Inputs;
+use crate::kernel::matmul::tune::base::{Inputs, MatmulAutotuneKey};
 
 type MatmulTunables<Out> = TunableSet<MatmulAutotuneKey, Inputs, Out>;
 
