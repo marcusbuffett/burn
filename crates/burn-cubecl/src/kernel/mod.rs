@@ -9,6 +9,7 @@ mod cross;
 mod index;
 mod mask;
 mod memory_order;
+pub(crate) mod swiglu;
 mod unary_float;
 mod unary_int;
 mod unary_numeric;
