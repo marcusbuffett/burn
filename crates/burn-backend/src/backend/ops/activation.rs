@@ -6,6 +6,24 @@ use core::f64::consts::SQRT_2;
 ///
 /// This trait let backend implementations override activation functions for better performance.
 pub trait ActivationOps<B: Backend> {
+    /// Apply SiLU(gate) * up to two halves packed along the last axis.
+    fn swiglu(tensor: FloatTensor<B>) -> FloatTensor<B> {
+        let (gate, up, _) = split_swiglu::<B>(tensor);
+        B::float_mul(B::float_mul(gate.clone(), B::sigmoid(gate)), up)
+    }
+
+    /// Differentiate packed SwiGLU without scattering two full-size zero gradients.
+    fn swiglu_backward(tensor: FloatTensor<B>, grad: FloatTensor<B>) -> FloatTensor<B> {
+        let (gate, up, axis) = split_swiglu::<B>(tensor);
+        let sigmoid = B::sigmoid(gate.clone());
+        let activated = B::float_mul(gate, sigmoid.clone());
+        let complement = B::float_add_scalar(B::float_neg(sigmoid.clone()), 1f32.into());
+        let derivative = B::float_add(sigmoid, B::float_mul(activated.clone(), complement));
+        let gate_grad = B::float_mul(B::float_mul(grad.clone(), up), derivative);
+        let up_grad = B::float_mul(grad, activated);
+        B::float_cat(alloc::vec![gate_grad, up_grad], axis)
+    }
+
     /// Applies the LeakyReLU activation function.
     ///
     /// # Arguments
@@ -340,4 +358,23 @@ pub trait ActivationOps<B: Backend> {
             ),
         )
     }
+}
+
+fn split_swiglu<B: Backend>(tensor: FloatTensor<B>) -> (FloatTensor<B>, FloatTensor<B>, usize) {
+    let shape = tensor.shape();
+    let axis = shape
+        .num_dims()
+        .checked_sub(1)
+        .expect("SwiGLU requires at least one axis");
+    let width = shape[axis];
+    assert!(
+        width.is_multiple_of(2),
+        "Packed SwiGLU requires an even last dimension"
+    );
+    let mut slices: alloc::vec::Vec<crate::Slice> =
+        shape.iter().map(|&dim| (0..dim).into()).collect();
+    slices[axis] = (0..width / 2).into();
+    let gate = B::float_slice(tensor.clone(), &slices);
+    slices[axis] = (width / 2..width).into();
+    (gate, B::float_slice(tensor, &slices), axis)
 }
