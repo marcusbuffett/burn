@@ -423,6 +423,15 @@ pub fn silu<const D: usize>(tensor: Tensor<D>) -> Tensor<D> {
     tensor.clone().mul(sigmoid(tensor))
 }
 
+/// Packed SwiGLU: split the last axis into gate/up halves and return `silu(gate) * up`.
+/// The last dimension must be even. Its specialized backward avoids full-size
+/// zero gradients for each slice.
+pub fn swiglu<const D: usize>(tensor: Tensor<D>) -> Tensor<D> {
+    Tensor::new(BridgeTensor::float(Dispatch::swiglu(
+        tensor.primitive.into_float(),
+    )))
+}
+
 /// Applies the hard swish function element-wise.
 ///
 #[cfg_attr(

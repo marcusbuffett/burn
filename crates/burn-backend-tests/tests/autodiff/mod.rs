@@ -2,6 +2,7 @@
 pub use super::*;
 
 mod abs;
+mod swiglu;
 mod adaptive_avgpool1d;
 mod adaptive_avgpool2d;
 mod adaptive_avgpool3d;

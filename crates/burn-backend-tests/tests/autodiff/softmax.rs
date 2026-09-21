@@ -88,3 +88,37 @@ fn test_quiet_softmax_grad() {
         .to_data()
         .assert_approx_eq::<FloatElem>(&expected, tolerance);
 }
+
+#[test]
+fn normalized_gradients_match_explicit_decomposition() {
+    let device = AutodiffDevice::new();
+    for dim in [0, 1] {
+        for logarithmic in [false, true] {
+            let data = TensorData::from([[-2.0, 0.1, 1.0], [0.3, 2.0, -0.5]]);
+            let input = TestTensor::<2>::from_data(data.clone(), &device).require_grad();
+            let reference = TestTensor::<2>::from_data(data, &device).require_grad();
+            let output = if logarithmic {
+                activation::log_softmax(input.clone(), dim)
+            } else {
+                activation::softmax(input.clone(), dim)
+            };
+            let shifted = reference.clone() - reference.clone().detach().max_dim(dim);
+            let sum = shifted.clone().exp().sum_dim(dim);
+            let expected = if logarithmic {
+                shifted - sum.log()
+            } else {
+                shifted.exp() / sum
+            };
+            let grads = output.square().mean().backward();
+            let reference_grads = expected.square().mean().backward();
+            input
+                .grad(&grads)
+                .unwrap()
+                .to_data()
+                .assert_approx_eq::<FloatElem>(
+                    &reference.grad(&reference_grads).unwrap().to_data(),
+                    Tolerance::rel_abs(1e-4, 1e-4),
+                );
+        }
+    }
+}

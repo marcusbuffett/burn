@@ -5,6 +5,13 @@ use crate::Dispatch;
 
 #[backend_dispatch]
 impl ActivationOps<Self> for Dispatch {
+    fn swiglu(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
+        B::swiglu(tensor)
+    }
+    fn swiglu_backward(tensor: FloatTensor<Self>, grad: FloatTensor<Self>) -> FloatTensor<Self> {
+        B::swiglu_backward(tensor, grad)
+    }
+
     fn leaky_relu(tensor: FloatTensor<Self>, negative_slope: Scalar) -> FloatTensor<Self> {
         B::leaky_relu(tensor, negative_slope)
     }
