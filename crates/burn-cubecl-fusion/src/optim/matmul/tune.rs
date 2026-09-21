@@ -156,18 +156,13 @@ pub fn fused_matmul_autotune(
 
         // First entry should always work, since it is considered the fallback.
         let mut set = TunableSet::new(create_key, FusionInputGen).with(
-            Tunable::new("fused_matmul_fallback", tune_fallback).group(&unit, |key| {
-                if matches!(key.matmul_key.analysis.kind, MatmulKind::InnerProduct) {
-                    PRIORITY_MAX
-                } else if matches!(
-                    key.matmul_key.analysis.scale_global,
-                    MatmulGlobalScale::Small
-                ) {
-                    PRIORITY_HIGH
-                } else {
-                    PRIORITY_MIN
-                }
-            }),
+            Tunable::new("unfused_matmul_epilogue", tune_fallback)
+                // The separate matmul can use transforms (such as batch merging
+                // and split-K) that fused candidates do not support. Compare it
+                // in the same round; fusion is not necessarily faster.
+                .group(&accelerated, |_| PRIORITY_MAX)
+                .group(&gemv, |_| PRIORITY_MAX)
+                .group(&unit, |_| PRIORITY_MAX),
         );
 
         // Vector-matrix kernels.
