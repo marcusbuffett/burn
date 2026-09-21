@@ -20,6 +20,7 @@ default = ["std", "fusion", "autotune", "burn-cubecl/default", "cubecl/default"]
 cpp = ["cubecl/cuda-cpp"]
 # Optional vendor GEMM candidate; tensors, fusion and autotune remain native.
 cublas = ["burn-cubecl/cuda-cublas"]
+cublas-bf16 = ["cublas", "burn-cubecl/cuda-cublas-bf16"]
 doc = ["burn-cubecl/doc"]
 std = ["burn-cubecl/std", "cubecl/std"]
 tracing = [

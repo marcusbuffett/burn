@@ -54,6 +54,8 @@ pub(super) struct MatmulAutotuneKey {
     merge_batches: bool,
     #[cfg(feature = "cuda-cublas")]
     cublas_eligible: bool,
+    #[cfg(feature = "cuda-cublas")]
+    cublas_bf16: bool,
 }
 
 impl core::ops::Deref for MatmulAutotuneKey {
@@ -273,9 +275,14 @@ pub fn matmul_autotune(
         #[cfg(feature = "cuda-cublas")]
         {
             set = set.with(
-                Tunable::new("cublas_tf32_gemm", |(lhs, rhs, out)| {
-                    crate::kernel::matmul::vendor::launch(lhs, rhs, out)
-                })
+                Tunable::new(
+                    if cfg!(feature = "cuda-cublas-bf16") {
+                        "cublas_bf16_gemm"
+                    } else {
+                        "cublas_tf32_gemm"
+                    },
+                    |(lhs, rhs, out)| crate::kernel::matmul::vendor::launch(lhs, rhs, out),
+                )
                 .group(&accelerated, |key| {
                     if key.cublas_eligible {
                         PRIORITY_MAX
@@ -715,6 +722,8 @@ fn create_key((lhs, rhs, out): &Inputs) -> MatmulAutotuneKey {
         merge_batches: !matches!(merged_action(lhs, rhs, out), MatmulTransformAction::Keep),
         #[cfg(feature = "cuda-cublas")]
         cublas_eligible: crate::kernel::matmul::vendor::descriptor(lhs, rhs, out).is_some(),
+        #[cfg(feature = "cuda-cublas")]
+        cublas_bf16: cfg!(feature = "cuda-cublas-bf16"),
     }
 }
 

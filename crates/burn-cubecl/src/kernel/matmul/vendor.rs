@@ -1,7 +1,7 @@
 use crate::tensor::CubeTensor;
 use burn_backend::DType;
 use burn_std::{MatmulTransformAnalysis, MatmulTransformPolicy, Metadata};
-use cubecl::cuda::blas::Gemm;
+use cubecl::cuda::blas::{Gemm, GemmPrecision};
 
 // cuBLAS strided batches need a single physical stride between matrices. A
 // permuted batch/head layout can violate that even when each matrix is dense.
@@ -80,6 +80,11 @@ pub(super) fn descriptor(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -
         return None;
     }
     Some(Gemm {
+        precision: if cfg!(feature = "cuda-cublas-bf16") {
+            GemmPrecision::Bf16
+        } else {
+            GemmPrecision::Tf32
+        },
         m: m.try_into().ok()?,
         n: n.try_into().ok()?,
         k: k.try_into().ok()?,
