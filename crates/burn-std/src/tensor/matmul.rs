@@ -108,6 +108,10 @@ pub enum MatmulTransformPolicy {
     /// row counts merge when that brings the output closer to square.
     #[default]
     BetterTiling,
+    /// Merge whenever the shared-rhs fold is a pure view. Useful as an
+    /// autotune candidate: row-tiled batches can still benefit from a larger
+    /// matrix's kernel selection and weight reuse.
+    AlwaysMerge,
     /// Never transform.
     Never,
 }
@@ -117,6 +121,15 @@ impl MatmulTransformPolicy {
     pub fn action(&self, analysis: &MatmulTransformAnalysis) -> MatmulTransformAction {
         match self {
             MatmulTransformPolicy::Never => MatmulTransformAction::Keep,
+            MatmulTransformPolicy::AlwaysMerge => {
+                if analysis.mergeable && analysis.batches > 1 {
+                    MatmulTransformAction::MergeBatches {
+                        rows: analysis.batches * analysis.rows,
+                    }
+                } else {
+                    MatmulTransformAction::Keep
+                }
+            }
             MatmulTransformPolicy::BetterTiling => {
                 if !analysis.mergeable || analysis.batches == 1 {
                     return MatmulTransformAction::Keep;
@@ -209,6 +222,10 @@ mod tests {
         let analysis = analysis(&[8, 512, 4096], &[4096, 14336]);
 
         assert_eq!(action(&analysis), MatmulTransformAction::Keep);
+        assert_eq!(
+            MatmulTransformPolicy::AlwaysMerge.action(&analysis),
+            MatmulTransformAction::MergeBatches { rows: 4096 }
+        );
     }
 
     #[test]

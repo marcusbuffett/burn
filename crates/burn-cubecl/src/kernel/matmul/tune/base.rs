@@ -8,6 +8,7 @@ use crate::{
 };
 use burn_backend::DType;
 use burn_backend::cubecl::dtype_to_storage_type;
+use burn_std::{MatmulTransformAction, MatmulTransformAnalysis, MatmulTransformPolicy};
 use cubecl::{
     client::Client,
     std::tensor::MatrixBatchLayout,
@@ -49,6 +50,8 @@ pub(super) struct MatmulAutotuneKey {
     // Exact eligibility: anchored K must not reuse a partition count that no
     // longer divides the real K, or exceeds the scratch budget.
     split_k_limit: usize,
+    // Exact layout eligibility, independent of the anchored problem shape.
+    merge_batches: bool,
 }
 
 impl core::ops::Deref for MatmulAutotuneKey {
@@ -569,37 +572,57 @@ pub fn matmul_autotune(
                 TileMatmulKind::Mma,
             ),
         ] {
-            let mut tunable = Tunable::new(&strategy.to_string(), move |(lhs, rhs, out)| {
-                launch_matmul::<_>(&strategy, lhs, rhs, out).map_err(|err| format!("{err:?}"))
-            });
+            for merge_batches in [false, true] {
+                let strategy = strategy.clone();
+                let name = if merge_batches {
+                    format!("merge_batches_{strategy}")
+                } else {
+                    strategy.to_string()
+                };
+                let mut tunable = Tunable::new(&name, move |(mut lhs, rhs, mut out): Inputs| {
+                    if merge_batches {
+                        let action = merged_action(&lhs, &rhs, &out);
+                        if matches!(action, MatmulTransformAction::Keep) {
+                            return Err("Matmul batches cannot be merged as a view".into());
+                        }
+                        action.apply(&mut lhs.meta);
+                        action.apply(&mut out.meta);
+                    }
+                    launch_matmul::<_>(&strategy, lhs, rhs, out).map_err(|err| format!("{err:?}"))
+                });
 
-            // Accelerated kernels are demoted when the device doesn't support the tile matmul
-            // they are built on, otherwise they would be compiled just to fail. They keep the
-            // minimum priority rather than being discarded, so they remain a last resort and
-            // the tune plan can never end up empty.
-            let accelerated_priority = move |key: &MatmulAutotuneKey, client: &Client| {
-                if !tile_matmul_supported(client, tile_matmul, &key.definition) {
-                    return PRIORITY_MIN;
+                // Accelerated kernels are demoted when the device doesn't support the tile matmul
+                // they are built on, otherwise they would be compiled just to fail. They keep the
+                // minimum priority rather than being discarded, so they remain a last resort and
+                // the tune plan can never end up empty.
+                let accelerated_priority = move |key: &MatmulAutotuneKey, client: &Client| {
+                    if merge_batches && !key.merge_batches {
+                        return PRIORITY_NEVER;
+                    }
+                    if !tile_matmul_supported(client, tile_matmul, &key.definition) {
+                        return PRIORITY_MIN;
+                    }
+
+                    match double_buf {
+                        false => PRIORITY_MAX,
+                        true => double_buffering_priority(key, PRIORITY_MAX, PRIORITY_HIGH),
+                    }
+                };
+
+                // tile group
+                let client_tile = tune_client.clone();
+                tunable = tunable.group(tile_group, move |key| {
+                    accelerated_priority(key, &client_tile)
+                });
+
+                // extra group
+                if let Some(group) = group_extra {
+                    let client_extra = tune_client.clone();
+                    tunable =
+                        tunable.group(group, move |key| accelerated_priority(key, &client_extra));
                 }
-
-                match double_buf {
-                    false => PRIORITY_MAX,
-                    true => double_buffering_priority(key, PRIORITY_MAX, PRIORITY_HIGH),
-                }
-            };
-
-            // tile group
-            let client_tile = tune_client.clone();
-            tunable = tunable.group(tile_group, move |key| {
-                accelerated_priority(key, &client_tile)
-            });
-
-            // extra group
-            if let Some(group) = group_extra {
-                let client_extra = tune_client.clone();
-                tunable = tunable.group(group, move |key| accelerated_priority(key, &client_extra));
+                set = set.with(tunable);
             }
-            set = set.with(tunable);
         }
 
         for partitions in [32, 128] {
@@ -671,5 +694,20 @@ fn create_key((lhs, rhs, out): &Inputs) -> MatmulAutotuneKey {
         matmul,
         batches: shape[..shape.len() - 2].iter().product(),
         split_k_limit: crate::kernel::matmul::split_k::partition_limit(lhs, rhs, out),
+        merge_batches: !matches!(merged_action(lhs, rhs, out), MatmulTransformAction::Keep),
     }
+}
+
+fn merged_action(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -> MatmulTransformAction {
+    if lhs.qparams.is_some()
+        || rhs.qparams.is_some()
+        || lhs.meta.tiling.is_tiled()
+        || rhs.meta.tiling.is_tiled()
+        || out.meta.tiling.is_tiled()
+    {
+        return MatmulTransformAction::Keep;
+    }
+    MatmulTransformPolicy::AlwaysMerge.action(&MatmulTransformAnalysis::from_metadata(
+        &lhs.meta, &rhs.meta, &out.meta,
+    ))
 }
