@@ -130,11 +130,13 @@ fn matmul_transposed_operand_reused_in_epilogue() {
     let device = Device::default();
     let reference = ReferenceDevice::new();
     for (rows, cols) in [(192, 12), (768, 80), (19, 7)] {
+        // Exactly representable in TF32 as well as FP32: this regression tests
+        // indexing, independently of the selected matmul's input rounding.
         let data: Vec<f32> = (0..rows * cols)
-            .map(|i| ((i * 31 % 101) as f32 - 50.0) / 100.0)
+            .map(|i| ((i * 31 % 101) as f32 - 50.0) / 128.0)
             .collect();
         let square: Vec<f32> = (0..cols * cols)
-            .map(|i| ((i * 13 % 37) as f32 - 18.0) / 100.0)
+            .map(|i| ((i * 13 % 37) as f32 - 18.0) / 64.0)
             .collect();
         let x = TestTensor::<1>::from_data(data.as_slice(), &device)
             .reshape([rows, cols])
@@ -149,5 +151,46 @@ fn matmul_transposed_operand_reused_in_epilogue() {
         expected
             .to_data()
             .assert_approx_eq::<FloatElem>(&actual.to_data(), Tolerance::default());
+    }
+}
+
+/// Explore parallel reduction for the long-K, small-output linear weight
+/// gradients found in training. Opt in on an idle GPU; includes completion.
+#[test]
+#[ignore]
+fn matmul_linear_gradient_split_k_benchmark() {
+    let device = Device::default();
+    let (rows, inputs, outputs) = (131072, 192, 576);
+    let x = TestTensor::<2>::random([rows, inputs], Distribution::Normal(0.0, 0.02), &device);
+    let dy = TestTensor::<2>::random([rows, outputs], Distribution::Normal(0.0, 0.02), &device);
+    let expected = x.clone().transpose().matmul(dy.clone()).to_data();
+    for partitions in [1, 8, 32, 128] {
+        let operation = || {
+            if partitions == 1 {
+                x.clone().transpose().matmul(dy.clone())
+            } else {
+                let a = x.clone().reshape([partitions, rows / partitions, inputs]);
+                let b = dy.clone().reshape([partitions, rows / partitions, outputs]);
+                a.swap_dims(1, 2)
+                    .matmul(b)
+                    .sum_dim(0)
+                    .reshape([inputs, outputs])
+            }
+        };
+        expected
+            .assert_approx_eq::<FloatElem>(&operation().to_data(), Tolerance::rel_abs(1e-2, 1e-3));
+        let mut timings = Vec::new();
+        for iteration in 0..15 {
+            let start = std::time::Instant::now();
+            let sum = operation().sum().into_scalar::<f32>();
+            assert!(sum.is_finite());
+            if iteration >= 5 {
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        println!(
+            "linear_gradient_split_k partitions={partitions} ms={:.3}",
+            timings.iter().sum::<f64>() / timings.len() as f64
+        );
     }
 }
