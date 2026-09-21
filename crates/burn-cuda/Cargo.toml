@@ -16,6 +16,8 @@ workspace = true
 
 [features]
 default = ["std", "fusion", "autotune", "burn-cubecl/default", "cubecl/default"]
+# Select CubeCL's CUDA C++/NVRTC compiler, including its TF32 tensor-core support.
+cpp = ["cubecl/cuda-cpp"]
 doc = ["burn-cubecl/doc"]
 std = ["burn-cubecl/std", "cubecl/std"]
 tracing = [
