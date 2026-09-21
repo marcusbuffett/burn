@@ -1,8 +1,8 @@
 mod base;
 #[cfg(feature = "autotune")]
-mod partitioned;
-#[cfg(feature = "autotune")]
 mod bounds;
+#[cfg(feature = "autotune")]
+mod partitioned;
 #[cfg(feature = "autotune")]
 mod tune;
 

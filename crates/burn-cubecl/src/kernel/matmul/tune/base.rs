@@ -52,6 +52,8 @@ pub(super) struct MatmulAutotuneKey {
     split_k_limit: usize,
     // Exact layout eligibility, independent of the anchored problem shape.
     merge_batches: bool,
+    #[cfg(feature = "cuda-cublas")]
+    cublas_eligible: bool,
 }
 
 impl core::ops::Deref for MatmulAutotuneKey {
@@ -267,6 +269,22 @@ pub fn matmul_autotune(
                 }
             }),
         );
+
+        #[cfg(feature = "cuda-cublas")]
+        {
+            set = set.with(
+                Tunable::new("cublas_tf32_gemm", |(lhs, rhs, out)| {
+                    crate::kernel::matmul::vendor::launch(lhs, rhs, out)
+                })
+                .group(&accelerated, |key| {
+                    if key.cublas_eligible {
+                        PRIORITY_MAX
+                    } else {
+                        PRIORITY_NEVER
+                    }
+                }),
+            );
+        }
 
         // Matrix Vector multiplication kernels.
         for (strategy, double_buf) in [
@@ -695,6 +713,8 @@ fn create_key((lhs, rhs, out): &Inputs) -> MatmulAutotuneKey {
         batches: shape[..shape.len() - 2].iter().product(),
         split_k_limit: crate::kernel::matmul::split_k::partition_limit(lhs, rhs, out),
         merge_batches: !matches!(merged_action(lhs, rhs, out), MatmulTransformAction::Keep),
+        #[cfg(feature = "cuda-cublas")]
+        cublas_eligible: crate::kernel::matmul::vendor::descriptor(lhs, rhs, out).is_some(),
     }
 }
 
