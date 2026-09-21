@@ -11,3 +11,6 @@ pub use base::*;
 #[cfg(feature = "autotune")]
 pub use tune::*;
 pub use utils::*;
+
+#[cfg(feature = "cuda-cublas")]
+mod vendor;
