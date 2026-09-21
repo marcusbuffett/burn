@@ -6,6 +6,44 @@ use burn_tensor::Tolerance;
 const RANK: usize = 4;
 const SHAPE: [usize; RANK] = [2, 4, 8, 16];
 
+/// Measure low-output-count training reductions on an idle accelerator.
+#[test]
+#[ignore]
+fn reduction_long_axis_partition_benchmark() {
+    let device = Default::default();
+    let rows = 131072;
+    for columns in [192, 960] {
+        let input = TestTensor::<2>::ones([rows, columns], &device);
+        for partitions in [1, 8, 32, 128] {
+            let operation = || {
+                if partitions == 1 {
+                    input.clone().sum_dim(0)
+                } else {
+                    input
+                        .clone()
+                        .reshape([partitions, rows / partitions, columns])
+                        .sum_dim(1)
+                        .sum_dim(0)
+                        .reshape([1, columns])
+                }
+            };
+            let mut times = Vec::new();
+            for iteration in 0..15 {
+                let start = std::time::Instant::now();
+                let data = operation().to_data().try_to_vec::<f32>().unwrap();
+                assert!(data.iter().all(|&v| v == rows as f32));
+                if iteration >= 5 {
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            println!(
+                "reduce_long_axis columns={columns} partitions={partitions} ms={:.3}",
+                times.iter().sum::<f64>() / times.len() as f64
+            );
+        }
+    }
+}
+
 #[test]
 fn reduction_argmax_should_match_reference_backend() {
     let device = Default::default();
