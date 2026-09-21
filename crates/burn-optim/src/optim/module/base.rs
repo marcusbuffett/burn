@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::{RecordState, StateSink, StateSource};
@@ -31,6 +32,19 @@ pub trait Optimizer: Send + Sync + Clone + 'static {
         grad: Tensor<D>,
         state: Option<Self::State<D>>,
     ) -> (Tensor<D>, Option<Self::State<D>>);
+
+    /// Update independent parameters of one shape and device. The default
+    /// preserves per-parameter behavior; implementations may batch expensive work.
+    fn step_many<const D: usize>(
+        &self,
+        lr: LearningRate,
+        inputs: Vec<(Tensor<D>, Tensor<D>, Option<Self::State<D>>)>,
+    ) -> Vec<(Tensor<D>, Option<Self::State<D>>)> {
+        inputs
+            .into_iter()
+            .map(|(tensor, grad, state)| self.step(lr, tensor, grad, state))
+            .collect()
+    }
 
     /// Change the device of the state.
     ///
@@ -141,6 +155,19 @@ pub trait DynOptimizer: Send + Sync {
         state: Option<DynState>,
     ) -> (BridgeTensor, Option<DynState>);
 
+    /// Batched equivalent of `step_dyn`, preserving input order and count.
+    fn step_many_dyn(
+        &self,
+        rank: usize,
+        lr: LearningRate,
+        inputs: Vec<(BridgeTensor, BridgeTensor, Option<DynState>)>,
+    ) -> Vec<(BridgeTensor, Option<DynState>)> {
+        inputs
+            .into_iter()
+            .map(|(tensor, grad, state)| self.step_dyn(rank, lr, tensor, grad, state))
+            .collect()
+    }
+
     /// Move a state to the given device.
     fn to_device_dyn(&self, state: DynState, device: &Device) -> DynState;
 
@@ -179,6 +206,22 @@ impl<O: Optimizer> DynOptimizer for O {
             );
 
             (tensor.into_bridge(), state.map(|state| DynState::create(state, D)))
+        })
+    }
+
+    fn step_many_dyn(
+        &self,
+        rank: usize,
+        lr: LearningRate,
+        inputs: Vec<(BridgeTensor, BridgeTensor, Option<DynState>)>,
+    ) -> Vec<(BridgeTensor, Option<DynState>)> {
+        dispatch_rank!(rank, D => {
+            self.step_many(lr, inputs.into_iter().map(|(tensor, grad, state)| (
+                Tensor::<D>::from_bridge(tensor), Tensor::<D>::from_bridge(grad),
+                state.map(|state| state.downcast::<O::State<D>>()),
+            )).collect()).into_iter().map(|(tensor, state)| (
+                tensor.into_bridge(), state.map(|state| DynState::create(state, D)),
+            )).collect()
         })
     }
 
