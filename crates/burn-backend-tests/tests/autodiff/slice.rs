@@ -65,17 +65,18 @@ fn slice_gradients_accumulate_overlapping_and_dense_contributions() {
         let a = input.clone().slice([0..3]).sum();
         let b = input.clone().slice([2..5]).mul_scalar(2.).sum();
         let c = input.clone().slice(s![0..6;2]).mul_scalar(3.).sum();
+        let d = input.clone().slice([5..6]).mul_scalar(7.).sum();
         let dense = input.clone().mul_scalar(4.).sum();
         let output = if reverse {
-            dense + c + b + a
+            dense + d + c + b + a
         } else {
-            a + b + c + dense
+            a + b + c + d + dense
         };
         let grads = output.backward();
         input
             .grad(&grads)
             .unwrap()
             .to_data()
-            .assert_eq(&TensorData::from([8., 5., 10., 6., 9., 4.]), false);
+            .assert_eq(&TensorData::from([8., 5., 10., 6., 9., 11.]), false);
     }
 }
