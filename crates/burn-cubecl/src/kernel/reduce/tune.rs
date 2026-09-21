@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub struct ReduceDimAutotuneKey {
     /// The accumulator slots per reduction (`k` for top-k, `1` otherwise).
     accumulator_len: usize,
+    partition_limit: usize,
     /// The shape and dtypes of the reduction itself.
     reduce: ReduceAutotuneKey,
 }
@@ -183,7 +184,7 @@ pub fn autotune_reduce(
 
     let tune_id = CubeTuneId::new(&input.client, &input.device);
     let tunables = TUNER.init(&tune_id, || {
-        with_routine_tunables(
+        let set = with_routine_tunables(
             with_reduce_bounds(TunableSet::new(create_key, reduce_input_gen)),
             "reduce",
             |strategy,
@@ -205,6 +206,18 @@ pub fn autotune_reduce(
                 )
                 .map_err(|e| format!("{e}"))
             },
+        );
+        let group = TuneGroup::<ReduceDimAutotuneKey>::new("partitioned_sum", |key| {
+            if key.partition_limit > 1 { 2 } else { -1 }
+        });
+        set.with(
+            Tunable::new(
+                "partitioned_sum_32",
+                |(input, output, axis, config, dtypes)| {
+                    super::partitioned::launch(input, output, axis, config, dtypes)
+                },
+            )
+            .group(&group, |_| 2),
         )
     });
 
@@ -231,6 +244,7 @@ pub(crate) fn create_key(
 
     ReduceDimAutotuneKey::new(
         accumulator_len(*config),
+        super::partitioned::limit(input, output, *axis, *config),
         ReduceAutotuneKey::generate(
             elem_input,
             elem_output,
@@ -321,6 +335,7 @@ pub(crate) fn create_key_with_indices(
 
     ReduceDimAutotuneKey::new(
         accumulator_len(*config),
+        1,
         ReduceAutotuneKey::generate(
             elem_input,
             elem_output,

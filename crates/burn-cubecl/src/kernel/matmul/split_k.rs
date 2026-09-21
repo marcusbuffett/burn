@@ -48,7 +48,7 @@ fn partition_limit_for_shape(m: usize, n: usize, k: usize) -> usize {
     }
     let ceiling = 128.min(k / 1024).min((32 * 1024 * 1024) / elements);
     let mut partitions = 1;
-    while partitions * 2 <= ceiling && k % (partitions * 2) == 0 {
+    while partitions * 2 <= ceiling && k.is_multiple_of(partitions * 2) {
         partitions *= 2;
     }
     partitions
