@@ -32,12 +32,31 @@ use cubek::matmul::{
     routine::BlueprintStrategy,
     tiled::{Strategy as TiledStrategy, cpu_gemm::CpuGemmStrategy},
     tune_key::{
-        MatmulAutotuneKey, MatmulGlobalScale, MatmulProblemDefinition, StorageTileKey,
-        should_tune_double_buffering,
+        MatmulAutotuneKey as CubekMatmulAutotuneKey, MatmulGlobalScale, MatmulProblemDefinition,
+        StorageTileKey, should_tune_double_buffering,
     },
 };
+use serde::{Deserialize, Serialize};
 
 pub(super) type Inputs = (CubeTensor, CubeTensor, CubeTensor);
+
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Serialize, Deserialize, cubecl::AutotuneKey)]
+pub(super) struct MatmulAutotuneKey {
+    matmul: CubekMatmulAutotuneKey,
+    // Batched and single-matrix problems need different parallelism.
+    #[autotune(anchor)]
+    batches: usize,
+    // Exact eligibility: anchored K must not reuse a partition count that no
+    // longer divides the real K, or exceeds the scratch budget.
+    split_k_limit: usize,
+}
+
+impl core::ops::Deref for MatmulAutotuneKey {
+    type Target = CubekMatmulAutotuneKey;
+    fn deref(&self) -> &Self::Target {
+        &self.matmul
+    }
+}
 
 /// Whether the device can run `tile_matmul` with the element types of the matmul `definition`.
 ///
@@ -583,6 +602,31 @@ pub fn matmul_autotune(
             set = set.with(tunable);
         }
 
+        for partitions in [32, 128] {
+            for tile in [TileMatmulKind::Cmma, TileMatmulKind::Mma] {
+                let client = tune_client.clone();
+                set = set.with(
+                    Tunable::new(
+                        &format!("split_k_{partitions}_{tile:?}"),
+                        move |(lhs, rhs, out)| {
+                            crate::kernel::matmul::split_k::launch_split_k(
+                                lhs, rhs, out, partitions, tile,
+                            )
+                        },
+                    )
+                    .group(&accelerated, move |key| {
+                        if key.split_k_limit >= 2
+                            && tile_matmul_supported(&client, tile, &key.definition)
+                        {
+                            PRIORITY_MAX
+                        } else {
+                            PRIORITY_NEVER
+                        }
+                    }),
+                );
+            }
+        }
+
         // A storage-tiled operand is read only by the tiled cmma routine, which stages to its
         // tiles; every other candidate refuses it. The candidate joins the plan for such a
         // problem alone, so a plain one tunes as before.
@@ -608,7 +652,7 @@ pub fn matmul_autotune(
 }
 
 fn create_key((lhs, rhs, out): &Inputs) -> MatmulAutotuneKey {
-    MatmulAutotuneKey::generate(
+    let matmul = CubekMatmulAutotuneKey::generate(
         &lhs.client,
         lhs.meta.shape(),
         rhs.meta.shape(),
@@ -621,5 +665,11 @@ fn create_key((lhs, rhs, out): &Inputs) -> MatmulAutotuneKey {
         dtype_to_storage_type(out.dtype),
         lhs.try_scheme(),
         rhs.try_scheme(),
-    )
+    );
+    let shape = out.meta.shape();
+    MatmulAutotuneKey {
+        matmul,
+        batches: shape[..shape.len() - 2].iter().product(),
+        split_k_limit: crate::kernel::matmul::split_k::partition_limit(lhs, rhs, out),
+    }
 }

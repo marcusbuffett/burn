@@ -1,5 +1,7 @@
 mod base;
 #[cfg(feature = "autotune")]
+mod split_k;
+#[cfg(feature = "autotune")]
 mod tune;
 
 /// Contains utilities for matmul operation
