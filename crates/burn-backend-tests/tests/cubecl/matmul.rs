@@ -194,3 +194,36 @@ fn matmul_linear_gradient_split_k_benchmark() {
         );
     }
 }
+
+#[test]
+#[ignore]
+fn matmul_broadcast_vs_merged_benchmark() {
+    let device = Device::default();
+    for (batch, width, output) in [(2048, 192, 960), (512, 768, 3840)] {
+        let x =
+            TestTensor::<3>::random([batch, 64, width], Distribution::Normal(0.0, 0.02), &device);
+        let w = TestTensor::<2>::random([width, output], Distribution::Normal(0.0, 0.02), &device);
+        for merge in [false, true] {
+            let mut times = Vec::new();
+            for iteration in 0..15 {
+                let start = std::time::Instant::now();
+                let y = if merge {
+                    x.clone()
+                        .reshape([batch * 64, width])
+                        .matmul(w.clone())
+                        .reshape([batch, 64, output])
+                } else {
+                    x.clone().matmul(w.clone().unsqueeze::<3>())
+                };
+                assert!(y.sum().into_scalar::<f32>().is_finite());
+                if iteration >= 5 {
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            println!(
+                "matmul_broadcast batch={batch} width={width} merge={merge} ms={:.3}",
+                times.iter().sum::<f64>() / times.len() as f64
+            );
+        }
+    }
+}
