@@ -1046,6 +1046,24 @@ pub trait ModuleOps<B: Backend> {
         options: AttentionModuleOptions,
     ) -> FloatTensor<B>;
 
+    /// Applies RMS normalization over the last axis with FP32 norm accumulation.
+    /// `gamma` has shape `[features]`; the output has the input shape.
+    fn rms_norm(tensor: FloatTensor<B>, gamma: FloatTensor<B>, epsilon: f64) -> FloatTensor<B> {
+        let shape = tensor.shape();
+        let axis = shape.num_dims() - 1;
+        let dtype = tensor.dtype();
+        let x32 = B::float_cast(tensor.clone(), burn_std::FloatDType::F32);
+        let square = B::float_mul(x32.clone(), x32);
+        let rms = B::float_sqrt(B::float_add_scalar(
+            B::float_mean_dim(square, axis),
+            epsilon.into(),
+        ));
+        let norm = B::float_div(tensor, B::float_cast(rms, dtype.into()));
+        let mut broadcast = alloc::vec![1; shape.num_dims()];
+        broadcast[axis] = shape[axis];
+        B::float_mul(norm, B::float_reshape(gamma, broadcast.into()))
+    }
+
     /// Applies Layer Normalization over the last dimension of the input tensor.
     ///
     /// Computes `(x - mean) / sqrt(var + epsilon) * gamma + beta`, where `mean` and

@@ -1,5 +1,4 @@
 use crate::Initializer;
-use burn::tensor::DType;
 
 use burn::tensor::assert_shape;
 use burn_core as burn;
@@ -77,10 +76,7 @@ impl RmsNorm {
         let [d_model] = self.gamma.shape().dims();
         assert_shape!(x, [.., d_model]);
 
-        // Calculate the root-mean-square norm of the input tensor along the last dimension
-        let dtype = x.dtype();
-        let rms = (x.clone().cast(DType::F32).square().mean_dim(D - 1) + self.epsilon).sqrt();
-        (x / rms.cast(dtype)) * self.gamma.val().unsqueeze()
+        burn::tensor::module::rms_norm(x, self.gamma.val(), self.epsilon)
     }
 }
 

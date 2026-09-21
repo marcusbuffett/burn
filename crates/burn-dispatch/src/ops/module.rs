@@ -662,6 +662,14 @@ impl ModuleOps<Self> for Dispatch {
         B::attention(query, key, value, mask, attn_bias, options)
     }
 
+    fn rms_norm(
+        tensor: FloatTensor<Self>,
+        gamma: FloatTensor<Self>,
+        epsilon: f64,
+    ) -> FloatTensor<Self> {
+        B::rms_norm(tensor, gamma, epsilon)
+    }
+
     fn layer_norm(
         tensor: FloatTensor<Self>,
         gamma: FloatTensor<Self>,
