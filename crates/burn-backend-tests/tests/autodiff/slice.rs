@@ -65,3 +65,29 @@ fn should_panic_on_slice_with_step() {
     // This should panic because step is 2
     let _sliced = tensor.slice(s![.., 0..4; 2]);
 }
+
+#[test]
+fn slice_gradients_accumulate_overlapping_and_dense_contributions() {
+    use burn_tensor::s;
+    let device = AutodiffDevice::new();
+    let input = TestTensor::<1>::from_floats([1., 2., 3., 4., 5., 6.], &device).require_grad();
+    // Include disjoint, overlapping, stepped, and dense contributions. Their
+    // traversal order must not change the accumulated gradient.
+    for reverse in [false, true] {
+        let a = input.clone().slice([0..3]).sum();
+        let b = input.clone().slice([2..5]).mul_scalar(2.).sum();
+        let c = input.clone().slice(s![0..6;2]).mul_scalar(3.).sum();
+        let dense = input.clone().mul_scalar(4.).sum();
+        let output = if reverse {
+            dense + c + b + a
+        } else {
+            a + b + c + dense
+        };
+        let grads = output.backward();
+        input
+            .grad(&grads)
+            .unwrap()
+            .to_data()
+            .assert_eq(&TensorData::from([8., 5., 10., 6., 9., 4.]), false);
+    }
+}
