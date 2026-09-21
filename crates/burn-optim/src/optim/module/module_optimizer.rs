@@ -14,7 +14,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use burn::module::{Module, ModuleMapper, Param, ParamId};
 use burn::store::RecordError;
-use burn::tensor::{Bytes, Device, Tensor};
+use burn::tensor::kind::BridgeTensor;
+use burn::tensor::{Bytes, DType, Device, Tensor};
 use hashbrown::HashMap;
 
 /// Scalar key (per parameter) under which the parameter's state rank is persisted.
@@ -124,6 +125,61 @@ impl ModuleOptimizer {
             &mut grads,
             lr_policy,
         ))
+    }
+
+    /// Update parameters in same-shape groups, allowing optimizers to share
+    /// GPU launches. States remain per parameter and checkpoints are unchanged.
+    pub fn step_batched<M: Module>(
+        &mut self,
+        lr: impl Into<ModuleLearningRate>,
+        module: M,
+        grads: GradientsParams,
+    ) -> M {
+        let mut grads = grads.into();
+        let mut mapper = ModuleOptimizerMapper::new(
+            self.optimizers.iter().collect(),
+            &mut self.param_context,
+            &mut grads,
+            lr.into(),
+        );
+        mapper.pending = Some(Vec::new());
+        let module = module.map(&mut mapper);
+        let mut updated = HashMap::new();
+        for group in mapper.pending.take().unwrap() {
+            let (metadata, inputs): (Vec<_>, Vec<_>) = group
+                .items
+                .into_iter()
+                .map(|item| {
+                    (
+                        (item.id, item.path, item.context, item.clipping),
+                        (item.tensor, item.grad, item.state),
+                    )
+                })
+                .unzip();
+            let outputs = group.optim.step_many_dyn(group.rank, group.lr, inputs);
+            assert_eq!(
+                metadata.len(),
+                outputs.len(),
+                "Optimizer must preserve batch length"
+            );
+            for ((id, path, context, clipping), (tensor, state)) in
+                metadata.into_iter().zip(outputs)
+            {
+                if let Some(state) = state {
+                    mapper.states.insert(
+                        id,
+                        OptimizationContext {
+                            optim: group.optim.clone(),
+                            path: Some(path),
+                            state,
+                            grad_clipping: clipping,
+                        },
+                    );
+                }
+                updated.insert(id, (tensor, context));
+            }
+        }
+        module.map(&mut BatchedRestore { updated })
     }
 
     /// Adds an optimizer specific to a parameter group.
@@ -365,12 +421,48 @@ impl GradAdaptor {
     }
 }
 
+struct PendingParameter {
+    id: ParamId,
+    path: String,
+    context: ParameterContext,
+    clipping: Option<GradientClipping>,
+    tensor: BridgeTensor,
+    grad: BridgeTensor,
+    state: Option<DynState>,
+}
+
+struct PendingGroup {
+    rank: usize,
+    lr: crate::LearningRate,
+    shape: Vec<usize>,
+    dtype: DType,
+    device: Device,
+    optim: Arc<dyn DynOptimizer>,
+    items: Vec<PendingParameter>,
+}
+
+struct BatchedRestore {
+    updated: HashMap<ParamId, (BridgeTensor, ParameterContext)>,
+}
+
+impl ModuleMapper for BatchedRestore {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let (id, original, mapper) = param.consume();
+        let tensor = match self.updated.remove(&id) {
+            Some((tensor, context)) => context.restore(Tensor::from_bridge(tensor), id),
+            None => original,
+        };
+        Param::from_mapped_value(id, tensor, mapper)
+    }
+}
+
 struct ModuleOptimizerMapper<'a> {
     path: Vec<String>,
     optimizer_groups: Vec<&'a OptimizerGroup>,
     states: &'a mut HashMap<ParamId, OptimizationContext>,
     grads: &'a mut GradAdaptor,
     lr_module: ModuleLearningRate,
+    pending: Option<Vec<PendingGroup>>,
 }
 
 impl<'a> ModuleOptimizerMapper<'a> {
@@ -386,6 +478,7 @@ impl<'a> ModuleOptimizerMapper<'a> {
             states,
             grads,
             lr_module,
+            pending: None,
         }
     }
 
@@ -463,6 +556,40 @@ impl ModuleMapper for ModuleOptimizerMapper<'_> {
             );
 
             let lr = self.lr_module.lr_from_param(id, Some(path.as_str()));
+            if let Some(groups) = self.pending.as_mut() {
+                let shape = tensor.shape().to_vec();
+                let dtype = tensor.dtype();
+                let item = PendingParameter {
+                    id,
+                    path,
+                    context,
+                    clipping: grad_clipping,
+                    tensor: tensor.clone().inner().into_bridge(),
+                    grad: clipped_grad.into_bridge(),
+                    state: existing_dyn_state.map(|s| optim.to_device_dyn(s, &device)),
+                };
+                if let Some(group) = groups.iter_mut().find(|g| {
+                    g.rank == D
+                        && g.lr == lr
+                        && g.shape == shape
+                        && g.dtype == dtype
+                        && g.device == device
+                        && Arc::ptr_eq(&g.optim, &optim)
+                }) {
+                    group.items.push(item);
+                } else {
+                    groups.push(PendingGroup {
+                        rank: D,
+                        lr,
+                        shape,
+                        dtype,
+                        device,
+                        optim,
+                        items: vec![item],
+                    });
+                }
+                return Param::from_mapped_value(id, tensor, mapper);
+            }
             let (tensor, state) = optim.step_dyn(
                 D,
                 lr,
@@ -546,6 +673,38 @@ mod tests {
         // Panics without the fix: the updated parameter and the input meet
         // under two strategies.
         let _ = optim.step(lr(), model.clone(), make_grads(&model, x));
+    }
+
+    #[test]
+    fn batched_step_preserves_states_and_checkpointing() {
+        let device = Device::default().autodiff().gradient_checkpointing();
+        let mut sequential = make_model(&device);
+        let mut batched = sequential.clone();
+        let mut a = AdamConfig::new().init();
+        let mut b = AdamConfig::new().init();
+        for _ in 0..3 {
+            let x = Tensor::<2>::random([2, 4], Distribution::Default, &device);
+            sequential = a.step(lr(), sequential.clone(), make_grads(&sequential, x.clone()));
+            batched = b.step_batched(lr(), batched.clone(), make_grads(&batched, x));
+            sequential
+                .layer_a
+                .weight
+                .val()
+                .to_data()
+                .assert_approx_eq::<f32>(
+                    &batched.layer_a.weight.val().to_data(),
+                    Tolerance::rel_abs(1e-5, 1e-5),
+                );
+            assert_eq!(
+                batched
+                    .layer_a
+                    .weight
+                    .val()
+                    .gradient_checkpointing_strategy(),
+                device.gradient_checkpointing_strategy()
+            );
+            b = AdamConfig::new().init().load_record(b.to_record());
+        }
     }
 
     fn sgd() -> ModuleOptimizer {
