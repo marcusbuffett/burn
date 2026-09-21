@@ -764,3 +764,13 @@ fn layer_norm_impl(
         epsilon,
     ))
 }
+
+/// RMS normalization over the last axis, with FP32 norm accumulation.
+/// `gamma` must contain one scale per feature of `input`.
+pub fn rms_norm<const D: usize>(input: Tensor<D>, gamma: Tensor<1>, epsilon: f64) -> Tensor<D> {
+    Tensor::new(BridgeTensor::float(Dispatch::rms_norm(
+        input.primitive.into_float(),
+        gamma.primitive.into_float(),
+        epsilon,
+    )))
+}

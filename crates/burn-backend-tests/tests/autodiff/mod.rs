@@ -2,7 +2,6 @@
 pub use super::*;
 
 mod abs;
-mod swiglu;
 mod adaptive_avgpool1d;
 mod adaptive_avgpool2d;
 mod adaptive_avgpool3d;
@@ -74,6 +73,7 @@ mod relu;
 mod remainder;
 mod repeat_dim;
 mod reshape;
+mod rms_norm;
 mod round;
 mod select;
 mod sigmoid;
@@ -85,6 +85,7 @@ mod softplus;
 mod sort;
 mod sqrt;
 mod sub;
+mod swiglu;
 mod topk;
 mod transpose;
 mod trig;

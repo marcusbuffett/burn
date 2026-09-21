@@ -16,6 +16,72 @@ use burn_std::IntDType;
 use super::OpsKind;
 
 impl<B: Backend, C: CheckpointStrategy> ModuleOps<Autodiff<B, C>> for Autodiff<B, C> {
+    fn rms_norm(x: AutodiffTensor<B>, gamma: AutodiffTensor<B>, epsilon: f64) -> AutodiffTensor<B> {
+        #[derive(Debug)]
+        struct RmsNorm;
+        impl<B: Backend> Backward<B, 2> for RmsNorm {
+            // Inner tensors only: keeping autodiff nodes here would retain graphs.
+            type State = (FloatTensor<B>, FloatTensor<B>, FloatTensor<B>);
+            fn backward(
+                self,
+                ops: Ops<Self::State, 2>,
+                grads: &mut Gradients,
+                _checkpointer: &mut Checkpointer,
+            ) {
+                let (norm, rms, gamma) = ops.state;
+                let grad = grads.consume::<B>(&ops.node);
+                let [node_x, node_gamma] = ops.parents;
+                let shape = norm.shape();
+                let axis = shape.num_dims() - 1;
+                if let Some(node) = node_x {
+                    let scaled = B::float_mul(grad.clone(), gamma);
+                    let projection =
+                        B::float_mean_dim(B::float_mul(scaled.clone(), norm.clone()), axis);
+                    let dx = B::float_div(
+                        B::float_sub(scaled, B::float_mul(norm.clone(), projection)),
+                        rms,
+                    );
+                    grads.register::<B>(node.id, dx);
+                }
+                if let Some(node) = node_gamma {
+                    let features = shape[axis];
+                    let rows = shape.num_elements() / features;
+                    let product = B::float_mul(grad, norm);
+                    let flat = B::float_reshape(product, [rows, features].into());
+                    let dg = B::float_reshape(B::float_sum_dim(flat, 0), [features].into());
+                    grads.register::<B>(node.id, dg);
+                }
+            }
+        }
+        match RmsNorm
+            .prepare::<C>([x.node(), gamma.node()])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => {
+                let shape = x.primitive.shape();
+                let axis = shape.num_dims() - 1;
+                let dtype = x.primitive.dtype();
+                let x32 = B::float_cast(x.primitive.clone(), burn_std::FloatDType::F32);
+                let square = B::float_mul(x32.clone(), x32);
+                let rms = B::float_sqrt(B::float_add_scalar(
+                    B::float_mean_dim(square, axis),
+                    epsilon.into(),
+                ));
+                let rms = B::float_cast(rms, dtype.into());
+                let norm = B::float_div(x.primitive, rms.clone());
+                let mut broadcast = alloc::vec![1; shape.num_dims()];
+                broadcast[axis] = shape[axis];
+                let gamma = B::float_reshape(gamma.primitive, broadcast.into());
+                let output = B::float_mul(norm.clone(), gamma.clone());
+                prep.finish((norm, rms, gamma), output)
+            }
+            OpsKind::UnTracked(prep) => {
+                prep.finish(B::rms_norm(x.primitive, gamma.primitive, epsilon))
+            }
+        }
+    }
+
     fn batch_norm_train(
         x: AutodiffTensor<B>,
         gamma: AutodiffTensor<B>,
