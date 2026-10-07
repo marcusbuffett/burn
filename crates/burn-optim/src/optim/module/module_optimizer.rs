@@ -251,6 +251,12 @@ impl ModuleOptimizer {
             .expect("Should match at least one parameter group.")
     }
 
+    /// The parameters this optimizer currently holds state for (e.g. just after
+    /// [`load`](ModuleOptimizer::load), to check it binds to a module's parameters).
+    pub fn state_param_ids(&self) -> Vec<ParamId> {
+        self.param_context.keys().copied().collect()
+    }
+
     /// Decompose the optimizer state into a serializable [`OptimizerRecord`].
     pub fn to_record(&self) -> OptimizerRecord {
         let mut tensors = Vec::new();
@@ -300,8 +306,15 @@ impl ModuleOptimizer {
     /// each parameter's state is migrated to that parameter's (gradient's) device on the next
     /// [`step`](ModuleOptimizer::step) — see the `to_device` call in the step path. The load device
     /// is therefore irrelevant to correctness.
-    pub fn load_record(mut self, record: OptimizerRecord) -> Self {
-        let device = Device::default();
+    pub fn load_record(self, record: OptimizerRecord) -> Self {
+        self.load_record_on(record, &Device::default())
+    }
+
+    /// [`load_record`](ModuleOptimizer::load_record), materializing the state on `device`
+    /// rather than the default device, so the first step does not have to migrate it (on
+    /// multi-GPU runs that migration is a device-to-device copy).
+    pub fn load_record_on(mut self, record: OptimizerRecord, device: &Device) -> Self {
+        let device = device.clone();
         let mut ranks: BTreeMap<u64, usize> = BTreeMap::new();
         let mut paths: BTreeMap<u64, String> = BTreeMap::new();
 
@@ -381,6 +394,24 @@ impl ModuleOptimizer {
     #[cfg(feature = "std")]
     pub fn load<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, RecordError> {
         Ok(self.load_record(OptimizerRecord::load(path)?))
+    }
+
+    /// [`load`](ModuleOptimizer::load) onto `device`; see
+    /// [`load_record_on`](ModuleOptimizer::load_record_on).
+    #[cfg(feature = "std")]
+    pub fn load_on<P: AsRef<std::path::Path>>(
+        self,
+        path: P,
+        device: &Device,
+    ) -> Result<Self, RecordError> {
+        Ok(self.load_record_on(OptimizerRecord::load(path)?, device))
+    }
+
+    /// Adopt `other`'s per-parameter state alongside this one's (entries for the same
+    /// parameter are taken from `other`). Reassembles state saved in shards.
+    pub fn merge_state(mut self, other: ModuleOptimizer) -> Self {
+        self.param_context.extend(other.param_context);
+        self
     }
 }
 
