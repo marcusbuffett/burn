@@ -5,7 +5,10 @@ use cubecl::{
     std::throughput::roofline_bounds,
     tune::{TunableSet, Work},
 };
-use cubek::matmul::definition::{MatmulCost, MatmulGlobalElems};
+use cubek::matmul::{
+    definition::{MatmulCost, MatmulElems, MatmulGlobalElems, compute_key},
+    multi_level::definition::adjust_dtypes,
+};
 
 type Inputs = FusionTuneInputs<MatmulOptimizationTuneArg>;
 
@@ -43,9 +46,16 @@ pub(crate) fn with_fused_matmul_bounds(
             bytes: info.trace.traffic(tensors),
         };
 
+        // The register types the accelerated candidates run on, as the unfused matmul's bounds
+        // use: `MatmulCost::compute_key` keys FP32 storage to the scalar FP32 peak, far below
+        // the TF32 tensor cores, so the first TF32 candidate would beat the roofline and end the
+        // round before the others (and the unfused epilogue) were compared.
+        let mut elems = MatmulElems::from_globals(&cost.elems);
+        adjust_dtypes(&info.client, &mut elems, true);
+
         roofline_bounds(
             &info.client,
-            cost.compute_key(&info.client),
+            compute_key(&info.client, &elems),
             work,
             thresholds,
         )
