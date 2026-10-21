@@ -111,6 +111,19 @@ pub fn matmul_autotune(
         return output;
     }
 
+    // FP16 products cuBLAS can take go straight to it. At inference sizes
+    // (64-row activations) autotune kept generated kernels for about half of
+    // them, and forcing cuBLAS cut a T4 serving forward from 8.7 to 7.7 ms.
+    // FP32 (TF32/BF16 training products) stays tuned.
+    #[cfg(feature = "cuda-cublas")]
+    if lhs.dtype == DType::F16
+        && crate::kernel::matmul::vendor::descriptor(&lhs, &rhs, &output).is_some()
+    {
+        if crate::kernel::matmul::vendor::launch(lhs.clone(), rhs.clone(), output.clone()).is_ok() {
+            return output;
+        }
+    }
+
     let client = lhs.client.clone();
     let tune_client = client.clone();
     let num_cpu_cores = client.properties().hardware.num_cpu_cores;
@@ -276,11 +289,8 @@ pub fn matmul_autotune(
         {
             set = set.with(
                 Tunable::new(
-                    if cfg!(feature = "cuda-cublas-bf16") {
-                        "cublas_bf16_gemm"
-                    } else {
-                        "cublas_tf32_gemm"
-                    },
+                    // Precision follows the operands (see `vendor::descriptor`).
+                    "cublas_gemm",
                     |(lhs, rhs, out)| crate::kernel::matmul::vendor::launch(lhs, rhs, out),
                 )
                 .group(&accelerated, |key| {

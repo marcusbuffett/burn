@@ -42,10 +42,23 @@ fn layout(meta: &Metadata) -> Option<(bool, i32)> {
 }
 
 pub(super) fn descriptor(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -> Option<Gemm> {
+    descriptor_inner(lhs, rhs, out)
+}
+
+fn descriptor_inner(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -> Option<Gemm> {
+    // FP32 operands run as TF32/BF16 products; all-FP16 operands (an F16
+    // serving model) as FP16 products with FP32 accumulation.
+    let precision = match (lhs.dtype, rhs.dtype, out.dtype) {
+        (DType::F32, DType::F32, DType::F32) if cfg!(feature = "cuda-cublas-bf16") => {
+            GemmPrecision::Bf16
+        }
+        (DType::F32, DType::F32, DType::F32) => GemmPrecision::Tf32,
+        (DType::F16, DType::F16, DType::F16) => GemmPrecision::F16,
+        _ => return None,
+    };
     if !lhs.client.name().starts_with("cuda-")
         || [lhs, rhs, out].iter().any(|t| {
-            t.dtype != DType::F32
-                || t.qparams.is_some()
+            t.qparams.is_some()
                 || t.meta.tiling.is_tiled()
                 || t.meta.num_dims() < 2
         })
@@ -80,11 +93,7 @@ pub(super) fn descriptor(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -
         return None;
     }
     Some(Gemm {
-        precision: if cfg!(feature = "cuda-cublas-bf16") {
-            GemmPrecision::Bf16
-        } else {
-            GemmPrecision::Tf32
-        },
+        precision,
         m: m.try_into().ok()?,
         n: n.try_into().ok()?,
         k: k.try_into().ok()?,
@@ -103,7 +112,7 @@ pub(super) fn descriptor(lhs: &CubeTensor, rhs: &CubeTensor, out: &CubeTensor) -
 pub(super) fn launch(lhs: CubeTensor, rhs: CubeTensor, out: CubeTensor) -> Result<(), String> {
     let gemm = descriptor(&lhs, &rhs, &out).ok_or("Unsupported cuBLAS matmul layout")?;
     // SAFETY: Burn matmul operands/output own valid nonaliasing bindings; the
-    // descriptor accepts only plain FP32 matrix layouts and uniform batches.
+    // descriptor accepts only plain FP32/FP16 matrix layouts and uniform batches.
     unsafe {
         gemm.launch(
             &lhs.client,
